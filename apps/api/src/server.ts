@@ -48,6 +48,8 @@ const verifyPassword = async (password: string, encoded: string) => {
 };
 
 const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer, { cors: { origin: env.WEB_ORIGIN, credentials: true }, maxHttpBufferSize: 32_000 });
 app.disable('x-powered-by');
 app.use(helmet());
 app.use(cors({ origin: env.WEB_ORIGIN, credentials: true }));
@@ -290,6 +292,22 @@ app.get('/api/v1/chat/messages', async (req, res, next) => {
     res.json({ data: { items: result.rows.reverse() } });
   } catch (error) { next(error); }
 });
+app.post('/api/v1/chat/messages', async (req, res, next) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const input = z.object({ clientId: z.string().uuid(), body: z.string().trim().min(1).max(4000) }).parse(req.body);
+    const couple = await requireCouple(userId, res); if (!couple) return;
+    const result = await pool.query(
+      `INSERT INTO chat_messages (couple_id, sender_id, client_id, body) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (sender_id, client_id) DO UPDATE SET body = chat_messages.body
+       RETURNING id, sender_id AS "senderId", client_id AS "clientId", body, created_at AS "createdAt"`,
+      [couple.id, userId, input.clientId, input.body],
+    );
+    const message = result.rows[0];
+    io.to(`couple:${couple.id}`).emit('chat:message', message);
+    res.status(201).json({ data: { item: message } });
+  } catch (error) { next(error); }
+});
 
 app.use('/api/v1/games', requireAuth);
 app.get('/api/v1/games', async (req, res, next) => {
@@ -396,8 +414,6 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
   res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Bir hata oluştu.' } });
 });
 
-const httpServer = createServer(app);
-const io = new Server(httpServer, { cors: { origin: env.WEB_ORIGIN, credentials: true }, maxHttpBufferSize: 32_000 });
 type ChasePoint = { x: number; y: number };
 type ChaseSession = { id: string; status: 'active' | 'completed'; catcherId: string; runnerId: string; positions: Record<string, ChasePoint>; winner: string | null; version: number };
 const chaseSessions = new Map<string, ChaseSession>();

@@ -31,6 +31,7 @@ Başarılı kaynak yanıtı `{ "data": ... }`; hata `{ "error": { "code", "messa
 | GET/POST | `/bucket-items` | Uygulandı; ortak listeyi getirir ve madde ekler |
 | PATCH/DELETE | `/bucket-items/:id` | Uygulandı; tamamlandı durumunu değiştirir veya kaldırır |
 | GET | `/chat/messages` | Uygulandı; son 100 mesajı getirir |
+| POST | `/chat/messages` | Uygulandı; mesajı veritabanına kaydeder, partner çevrimdışı olsa da gönderilebilir |
 | GET/POST | `/games` | Uygulandı; son oyunları listeler ve X-O oyunu başlatır |
 | GET | `/games/:id` | Uygulandı; oyun durumunu döndürür |
 | POST | `/uploads/presign` | Planlandı; henüz uygulanmadı |

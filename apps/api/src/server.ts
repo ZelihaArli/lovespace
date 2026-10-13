@@ -12,14 +12,14 @@ import { Server } from 'socket.io';
 import { z } from 'zod';
 
 dotenv.config();
-if (!process.env.DATABASE_URL) dotenv.config({ path: resolve(process.cwd(), '../../.env') });
+if (!process.env.DATABASE_URL && !process.env.POSTGRES_URL) dotenv.config({ path: resolve(process.cwd(), '../../.env') });
 
 const env = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(4000),
   WEB_ORIGIN: z.string().url().default('http://localhost:5173'),
   DATABASE_URL: z.string().min(1),
-}).parse(process.env);
+}).parse({ ...process.env, DATABASE_URL: process.env.DATABASE_URL ?? process.env.POSTGRES_URL });
 
 const pool = new Pool({ connectionString: env.DATABASE_URL, ssl: env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : undefined });
 const sessionCookie = env.NODE_ENV === 'production' ? '__Host-ls_session' : 'ls_session';

@@ -1,0 +1,12 @@
+{
+  "name": "lovespace",
+  "private": true,
+  "workspaces": ["apps/api", "apps/web"],
+  "scripts": {
+    "dev": "concurrently -n api,web -c magenta,cyan \"npm:dev -w @lovespace/api\" \"npm:dev -w @lovespace/web\"",
+    "build": "npm run build -w @lovespace/api && npm run build -w @lovespace/web",
+    "typecheck": "npm run typecheck -w @lovespace/api && npm run typecheck -w @lovespace/web"
+  },
+  "devDependencies": {"concurrently": "^9.1.2"},
+  "engines": {"node": ">=20"}
+}

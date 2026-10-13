@@ -4,7 +4,8 @@
     "api": {
       "root": "apps/api",
       "entrypoint": "src/server.ts",
-      "framework": "express"
+      "framework": "express",
+      "outputDirectory": "."
     },
     "web": {
       "root": "apps/web",

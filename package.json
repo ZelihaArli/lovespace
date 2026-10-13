@@ -1,7 +1,6 @@
 {
   "name": "lovespace",
   "private": true,
-  "type": "module",
   "workspaces": ["apps/api", "apps/web"],
   "scripts": {
     "dev": "concurrently -n api,web -c magenta,cyan \"npm:dev -w @lovespace/api\" \"npm:dev -w @lovespace/web\"",

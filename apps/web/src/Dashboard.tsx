@@ -81,6 +81,44 @@ export default function Dashboard({ user, onLogout }: { user: User; onLogout: ()
   useEffect(() => { if (couple) void loadTabData(tab); }, [couple, tab, loadTabData]);
 
   useEffect(() => {
+    if (tab !== 'chat' || !couple || !partner) return;
+    let stopped = false;
+    let refreshing = false;
+    const refreshMessages = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const result = await api<{ items: ChatMessage[] }>('/chat/messages');
+        if (!stopped) setMessages((current) => {
+          const merged = new Map(current.map((message) => [message.id, message]));
+          for (const message of result.items) merged.set(message.id, message);
+          return [...merged.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-100);
+        });
+      } catch { /* Keep the current conversation visible during brief network interruptions. */ }
+      finally { refreshing = false; }
+    };
+    const timer = window.setInterval(() => void refreshMessages(), 1800);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [tab, couple?.id, partner?.id]);
+
+  useEffect(() => {
+    if (tab !== 'games' || !couple || !partner) return;
+    let stopped = false;
+    let refreshing = false;
+    const refreshGames = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const result = await api<{ games: Game[] }>('/games');
+        if (!stopped) setGames(result.games);
+      } catch { /* Keep the current board visible during brief network interruptions. */ }
+      finally { refreshing = false; }
+    };
+    const timer = window.setInterval(() => void refreshGames(), 1500);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [tab, couple?.id, partner?.id]);
+
+  useEffect(() => {
     if (!couple || !partner) { socket?.disconnect(); setSocket(null); setLive(false); return; }
     const liveSocket = io({ withCredentials: true, transports: ['websocket', 'polling'] });
     setSocket(liveSocket);
@@ -152,9 +190,11 @@ export default function Dashboard({ user, onLogout }: { user: User; onLogout: ()
   const startGame = () => run(async () => {
     const result = await api<{ game: Game }>('/games', { method: 'POST', body: {} }); setGames((value) => [result.game, ...value]);
   });
-  const playCell = (game: Game, cell: number) => socket?.emit('game:move', { gameId: game.id, cell }, (result: { ok: boolean; error?: { message: string } }) => {
-    if (!result.ok) setError(result.error?.message ?? 'Bu hamle yapılamadı.');
-  });
+  const playCell = (game: Game, cell: number) => {
+    void api<{ game: Game }>(`/games/${game.id}/move`, { method: 'PATCH', body: { cell } })
+      .then(({ game: updated }) => setGames((current) => [updated, ...current.filter((entry) => entry.id !== updated.id)]))
+      .catch((cause) => setError(cause instanceof Error ? cause.message : 'Bu hamle yapılamadı.'));
+  };
 
   const panel = (children: ReactNode, className = '') => <section className={`rounded-3xl border border-rose-100 bg-white/80 p-5 shadow-sm sm:p-7 ${className}`}>{children}</section>;
   const title = (eyebrow: string, heading: string, help?: string) => <div className="mb-6"><p className="text-xs font-bold uppercase tracking-[.18em] text-rose-500">{eyebrow}</p><h2 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">{heading}</h2>{help && <p className="mt-2 text-sm text-rose-900/55">{help}</p>}</div>;
@@ -202,7 +242,7 @@ export default function Dashboard({ user, onLogout }: { user: User; onLogout: ()
           {!partner ? <p className="rounded-2xl bg-rose-50 p-4 text-sm text-rose-900/70">Sohbet için önce partnerinin davet koduyla katılması gerekiyor.</p> : <><div className="mb-4 flex h-[360px] flex-col gap-3 overflow-y-auto rounded-2xl bg-rose-50/70 p-4">{messages.map((message) => <div key={message.id} className={`max-w-[85%] rounded-2xl px-4 py-3 ${message.senderId === user.id ? 'self-end bg-rose-500 text-white' : 'self-start bg-white text-rose-950'}`}><p className="whitespace-pre-wrap break-words text-sm">{message.body}</p><p className={`mt-1 text-right text-[10px] ${message.senderId === user.id ? 'text-white/70' : 'text-rose-900/40'}`}>{new Date(message.createdAt).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}</p></div>)}{messages.length === 0 && <p className="m-auto text-sm text-rose-900/50">İlk mesajı sen gönder 💌</p>}</div><form onSubmit={sendMessage} className="flex gap-2"><input value={messageText} onChange={(event) => setMessageText(event.target.value)} maxLength={4000} className="min-w-0 flex-1 rounded-xl border border-rose-200 px-4 py-3" placeholder="Bir şeyler yaz…" /><button disabled={!messageText.trim() || sendingMessage} className="rounded-xl bg-rose-500 px-5 font-semibold text-white disabled:opacity-50">{sendingMessage ? 'Gönderiliyor…' : 'Gönder'}</button></form><div className="mt-3 flex items-center gap-3"><button disabled={!live} onClick={sendHeart} className="rounded-full bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-600 disabled:opacity-50">❤️ Kalp gönder</button><span className="text-xs text-rose-900/45">{live ? 'Canlı bağlantı açık' : 'Partnerin çevrimdışıysa mesajı sonra görür.'}</span></div></>}
         </>)}<div className="flex flex-col gap-2">{reactions.map((reaction) => <div key={reaction.id} className="animate-bounce rounded-2xl border border-rose-100 bg-white px-4 py-3 text-sm shadow-sm motion-reduce:animate-none">{reaction.emoji} {reaction.sender} gönderdi</div>)}</div></div>}
 
-        {tab === 'games' && <div className="space-y-5"><ChaseGame socket={socket} userId={user.id} partnerId={partner?.id ?? null} partnerName={partner?.displayName ?? 'Partnerin'} />{partner && <details className="rounded-3xl border border-rose-100 bg-white p-5"><summary className="cursor-pointer font-semibold text-rose-800">X-O oyunu (ekstra)</summary><button disabled={busy} onClick={startGame} className="mt-4 rounded-xl bg-rose-100 px-4 py-2.5 text-sm font-semibold text-rose-700">Yeni X-O oyunu başlat</button><div className="mt-4 grid gap-3 sm:grid-cols-2">{games.map((game) => <article key={game.id} className="rounded-2xl border border-rose-100 p-4"><p className="mb-3 text-sm font-medium">{game.status === 'active' ? game.state.turn === user.id ? 'Sıra sende' : `${partner.displayName} düşünüyor…` : game.state.winner ? 'Oyun bitti' : 'Berabere bitti'}</p><div className="mx-auto grid max-w-[220px] grid-cols-3 gap-2">{game.state.board.map((mark, cell) => <button key={cell} disabled={game.status !== 'active' || game.state.turn !== user.id || mark !== null || !live} onClick={() => playCell(game, cell)} className="grid aspect-square place-items-center rounded-xl bg-rose-50 text-3xl font-semibold text-rose-500 disabled:cursor-default">{mark}</button>)}</div></article>)}</div></details>}</div>}
+        {tab === 'games' && <div className="space-y-5"><ChaseGame userId={user.id} partnerId={partner?.id ?? null} partnerName={partner?.displayName ?? 'Partnerin'} />{partner && <details className="rounded-3xl border border-rose-100 bg-white p-5"><summary className="cursor-pointer font-semibold text-rose-800">X-O oyunu (ekstra)</summary><button disabled={busy} onClick={startGame} className="mt-4 rounded-xl bg-rose-100 px-4 py-2.5 text-sm font-semibold text-rose-700">Yeni X-O oyunu başlat</button><div className="mt-4 grid gap-3 sm:grid-cols-2">{games.map((game) => <article key={game.id} className="rounded-2xl border border-rose-100 p-4"><p className="mb-3 text-sm font-medium">{game.status === 'active' ? game.state.turn === user.id ? 'Sıra sende' : `${partner.displayName} düşünüyor…` : game.state.winner ? 'Oyun bitti' : 'Berabere bitti'}</p><div className="mx-auto grid max-w-[220px] grid-cols-3 gap-2">{game.state.board.map((mark, cell) => <button key={cell} disabled={game.status !== 'active' || game.state.turn !== user.id || mark !== null} onClick={() => playCell(game, cell)} className="grid aspect-square place-items-center rounded-xl bg-rose-50 text-3xl font-semibold text-rose-500 disabled:cursor-default">{mark}</button>)}</div></article>)}</div></details>}</div>}
       </>}
     </main>
   </div>;

@@ -32,8 +32,11 @@ Başarılı kaynak yanıtı `{ "data": ... }`; hata `{ "error": { "code", "messa
 | PATCH/DELETE | `/bucket-items/:id` | Uygulandı; tamamlandı durumunu değiştirir veya kaldırır |
 | GET | `/chat/messages` | Uygulandı; son 100 mesajı getirir |
 | POST | `/chat/messages` | Uygulandı; mesajı veritabanına kaydeder, partner çevrimdışı olsa da gönderilebilir |
+| GET/POST | `/chase-games/current`, `/chase-games` | Uygulandı; iki kişilik kovalamaca oyununu kalıcı olarak başlatır ve durumunu getirir |
+| PATCH | `/chase-games/:id/move` | Uygulandı; hamleyi veritabanı kilidiyle kaydeder, iki ekran düzenli yenileyerek eşitlenir |
 | GET/POST | `/games` | Uygulandı; son oyunları listeler ve X-O oyunu başlatır |
 | GET | `/games/:id` | Uygulandı; oyun durumunu döndürür |
+| PATCH | `/games/:id/move` | Uygulandı; X-O hamlesini sırayı doğrulayarak kaydeder |
 | POST | `/uploads/presign` | Planlandı; henüz uygulanmadı |
 | GET | `/health/live`, `/health/ready` | Canlılık ve DB dahil hazır olma kontrolü; hassas ayrıntı döndürmez |
 
@@ -41,7 +44,7 @@ Uygulanan gövdeler Zod ile doğrulanır. Sohbet ve tepki olayları istemci kiml
 
 ## Socket.IO
 
-Handshake HttpOnly oturum cookie'si ile yapılır. Bağlanınca kullanıcı oturumu ve çift üyeliği sunucudan bulunur; sunucu `couple:<id>` odasına ekler. İstemci oda seçemez. Socket CORS yalnızca `WEB_ORIGIN` ve payload boyutu sınırı uygulanır; olay bazlı hız sınırı yayına hazırlıkta eklenmelidir.
+Handshake HttpOnly oturum cookie'si ile yapılır. Bağlanınca kullanıcı oturumu ve çift üyeliği sunucudan bulunur; sunucu `couple:<id>` odasına ekler. İstemci oda seçemez. Veritabanı kalıcı durumun kaynağıdır; sohbet ve oyun ekranları Vercel işlev örnekleri arasında Socket.IO odaları paylaşılmadığı için REST üzerinden düzenli yenilenir. Socket.IO yalnızca aynı örneğe bağlı kullanıcılar arasında hızlı yayın sağlar.
 
 | Yön | Olay | Şema / davranış |
 |---|---|---|

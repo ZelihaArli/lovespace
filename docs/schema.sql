@@ -114,7 +114,7 @@ CREATE INDEX reactions_couple_recent ON reactions(couple_id, created_at DESC);
 CREATE TABLE game_sessions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   couple_id uuid NOT NULL REFERENCES couples(id) ON DELETE CASCADE,
-  game_type text NOT NULL CHECK (game_type IN ('tic_tac_toe','quiz','would_you_rather')),
+  game_type text NOT NULL CHECK (game_type IN ('tic_tac_toe','chase','quiz','would_you_rather')),
   status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','completed','abandoned')),
   state jsonb NOT NULL DEFAULT '{}'::jsonb,
   version integer NOT NULL DEFAULT 0,

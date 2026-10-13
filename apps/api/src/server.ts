@@ -75,6 +75,11 @@ const userQuery = `SELECT u.id, u.email, u.display_name AS "displayName"
   WHERE s.refresh_token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() AND u.deleted_at IS NULL`;
 type SessionUser = { id: string; email: string; displayName: string };
 type AuthRequest = express.Request & { user: SessionUser };
+type ChasePoint = { x: number; y: number };
+type ChaseSession = { id: string; status: 'active' | 'completed'; catcherId: string; runnerId: string; positions: Record<string, ChasePoint>; winner: string | null; version: number };
+type ChaseRow = { id: string; status: 'active' | 'completed'; state: Omit<ChaseSession, 'id' | 'status' | 'version'>; version: number };
+const presentChase = (row: ChaseRow): ChaseSession => ({ ...row.state, id: row.id, status: row.status, version: row.version });
+const winLines = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
 const requireAuth: express.RequestHandler = async (req, res, next) => {
   try {
     const token = req.cookies?.[sessionCookie];
@@ -103,7 +108,7 @@ const bucketInput = z.object({ title: z.string().trim().min(1).max(240), notes: 
 
 app.use('/api/v1/couples', requireAuth);
 app.post('/api/v1/couples', async (req, res, next) => {
-  const userId = (req as AuthRequest).user.id;
+  const userId = (req as unknown as AuthRequest).user.id;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -150,7 +155,7 @@ app.post('/api/v1/couples/invitations', async (req, res, next) => {
 });
 
 app.post('/api/v1/couples/invitations/accept', async (req, res, next) => {
-  const userId = (req as AuthRequest).user.id;
+  const userId = (req as unknown as AuthRequest).user.id;
   const tokenInput = z.object({ token: z.string().min(20).max(100) }).safeParse(req.body);
   if (!tokenInput.success) { res.status(400).json({ error: { code: 'INVALID_INVITATION', message: 'Davet kodu geçersiz.' } }); return; }
   const client = await pool.connect();
@@ -309,11 +314,76 @@ app.post('/api/v1/chat/messages', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.use('/api/v1/chase-games', requireAuth);
+app.get('/api/v1/chase-games/current', async (req, res, next) => {
+  try {
+    const couple = await requireCouple((req as AuthRequest).user.id, res); if (!couple) return;
+    const result = await pool.query(
+      `SELECT id, status, state, version FROM game_sessions
+       WHERE couple_id=$1 AND game_type='chase' ORDER BY created_at DESC LIMIT 1`, [couple.id],
+    );
+    res.json({ data: { game: result.rowCount ? presentChase(result.rows[0] as ChaseRow) : null } });
+  } catch (error) { next(error); }
+});
+app.post('/api/v1/chase-games', async (req, res, next) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const couple = await requireCouple(userId, res); if (!couple) return;
+    if (couple.memberCount !== 2) { res.status(409).json({ error: { code: 'PARTNER_REQUIRED', message: 'Önce partnerin daveti kabul edip çift alanına katılmalı.' } }); return; }
+    const members = await pool.query('SELECT user_id FROM couple_members WHERE couple_id=$1 ORDER BY joined_at, user_id LIMIT 2', [couple.id]);
+    const partnerId = members.rows.find((member: { user_id: string }) => member.user_id !== userId)?.user_id as string | undefined;
+    if (!partnerId) { res.status(409).json({ error: { code: 'PARTNER_REQUIRED', message: 'Partnerin bulunamadı.' } }); return; }
+    const state = { catcherId: userId, runnerId: partnerId, positions: { [userId]: { x: 1, y: 2 }, [partnerId]: { x: 7, y: 3 } }, winner: null };
+    const result = await pool.query(
+      `INSERT INTO game_sessions (couple_id, game_type, state, created_by) VALUES ($1,'chase',$2,$3)
+       RETURNING id, status, state, version`, [couple.id, state, userId],
+    );
+    const game = presentChase(result.rows[0] as ChaseRow);
+    io.to(`couple:${couple.id}`).emit('game:chase:state', game);
+    res.status(201).json({ data: { game } });
+  } catch (error) { next(error); }
+});
+app.patch('/api/v1/chase-games/:id/move', async (req, res, next) => {
+  const parsed = z.object({ x: z.number().int().min(0).max(8), y: z.number().int().min(0).max(5) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: { code: 'INVALID_MOVE', message: 'Hamle geçersiz.' } }); return; }
+  const userId = (req as unknown as AuthRequest).user.id;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const couple = await requireCouple(userId, res);
+    if (!couple) { await client.query('ROLLBACK'); return; }
+    const found = await client.query(
+      `SELECT id, status, state, version FROM game_sessions
+       WHERE id=$1 AND couple_id=$2 AND game_type='chase' FOR UPDATE`, [req.params.id, couple.id],
+    );
+    if (!found.rowCount) { await client.query('ROLLBACK'); res.status(404).json({ error: { code: 'GAME_NOT_FOUND', message: 'Oyun bulunamadı.' } }); return; }
+    const game = presentChase(found.rows[0] as ChaseRow);
+    if (game.status !== 'active' || !game.positions[userId]) { await client.query('ROLLBACK'); res.status(409).json({ error: { code: 'GAME_NOT_ACTIVE', message: 'Bu oyuna hamle yapılamıyor.' } }); return; }
+    const from = game.positions[userId]; const next = parsed.data;
+    if (Math.abs(from.x - next.x) + Math.abs(from.y - next.y) !== 1) { await client.query('ROLLBACK'); res.status(400).json({ error: { code: 'INVALID_MOVE', message: 'Bir seferde yalnızca bir kare ilerleyebilirsin.' } }); return; }
+    const positions = { ...game.positions, [userId]: next };
+    const catcher = positions[game.catcherId]; const runner = positions[game.runnerId];
+    const caught = catcher.x === runner.x && catcher.y === runner.y;
+    const state = { catcherId: game.catcherId, runnerId: game.runnerId, positions, winner: caught ? game.catcherId : null };
+    const status = caught ? 'completed' : 'active';
+    const updated = await client.query(
+      `UPDATE game_sessions SET state=$1, status=$2, version=version+1, updated_at=now(), completed_at=CASE WHEN $2='completed' THEN now() ELSE NULL END
+       WHERE id=$3 RETURNING id, status, state, version`, [state, status, game.id],
+    );
+    await client.query('COMMIT');
+    const result = presentChase(updated.rows[0] as ChaseRow);
+    io.to(`couple:${couple.id}`).emit('game:chase:state', result);
+    res.json({ data: { game: result } });
+  } catch (error) {
+    await client.query('ROLLBACK'); next(error);
+  } finally { client.release(); }
+});
+
 app.use('/api/v1/games', requireAuth);
 app.get('/api/v1/games', async (req, res, next) => {
   try {
     const couple = await requireCouple((req as AuthRequest).user.id, res); if (!couple) return;
-    const result = await pool.query('SELECT id, game_type AS "gameType", status, state, version, created_at AS "createdAt" FROM game_sessions WHERE couple_id=$1 ORDER BY created_at DESC LIMIT 20', [couple.id]);
+    const result = await pool.query(`SELECT id, game_type AS "gameType", status, state, version, created_at AS "createdAt" FROM game_sessions WHERE couple_id=$1 AND game_type='tic_tac_toe' ORDER BY created_at DESC LIMIT 20`, [couple.id]);
     res.json({ data: { games: result.rows } });
   } catch (error) { next(error); }
 });
@@ -324,6 +394,41 @@ app.get('/api/v1/games/:id', async (req, res, next) => {
     if (!result.rowCount) { res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Oyun bulunamadı.' } }); return; }
     res.json({ data: { game: result.rows[0] } });
   } catch (error) { next(error); }
+});
+app.patch('/api/v1/games/:id/move', async (req, res, next) => {
+  const parsed = z.object({ cell: z.number().int().min(0).max(8) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: { code: 'INVALID_MOVE', message: 'Hamle geçersiz.' } }); return; }
+  const userId = (req as unknown as AuthRequest).user.id;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const couple = await requireCouple(userId, res);
+    if (!couple) { await client.query('ROLLBACK'); return; }
+    const found = await client.query(
+      `SELECT id, state, version, status FROM game_sessions
+       WHERE id=$1 AND couple_id=$2 AND game_type='tic_tac_toe' FOR UPDATE`, [req.params.id, couple.id],
+    );
+    if (!found.rowCount) { await client.query('ROLLBACK'); res.status(404).json({ error: { code: 'GAME_NOT_FOUND', message: 'Oyun bulunamadı.' } }); return; }
+    const game = found.rows[0] as { id: string; state: { board: (string | null)[]; players: string[]; turn: string; winner: string | null }; version: number; status: string };
+    if (game.status !== 'active' || game.state.turn !== userId || !game.state.players.includes(userId) || game.state.board[parsed.data.cell] !== null) {
+      await client.query('ROLLBACK'); res.status(409).json({ error: { code: 'MOVE_NOT_ALLOWED', message: 'Şu anda bu hamleyi yapamazsın.' } }); return;
+    }
+    const board = [...game.state.board]; board[parsed.data.cell] = game.state.players[0] === userId ? 'X' : 'O';
+    const line = winLines.find(([a, b, c]) => board[a] !== null && board[a] === board[b] && board[a] === board[c]);
+    const winner = line ? userId : null;
+    const completed = Boolean(winner) || board.every(Boolean);
+    const state = { ...game.state, board, winner, turn: completed ? userId : game.state.players.find((player) => player !== userId)! };
+    const status = completed ? 'completed' : 'active';
+    const updated = await client.query(
+      `UPDATE game_sessions SET state=$1, version=version+1, status=$2, updated_at=now(), completed_at=CASE WHEN $2='completed' THEN now() ELSE NULL END
+       WHERE id=$3 RETURNING id, game_type AS "gameType", status, state, version, created_at AS "createdAt"`, [state, status, game.id],
+    );
+    await client.query('COMMIT');
+    io.to(`couple:${couple.id}`).emit('game:state', updated.rows[0]);
+    res.json({ data: { game: updated.rows[0] } });
+  } catch (error) {
+    await client.query('ROLLBACK'); next(error);
+  } finally { client.release(); }
 });
 app.post('/api/v1/games', async (req, res, next) => {
   try {
@@ -414,9 +519,6 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
   res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Bir hata oluştu.' } });
 });
 
-type ChasePoint = { x: number; y: number };
-type ChaseSession = { id: string; status: 'active' | 'completed'; catcherId: string; runnerId: string; positions: Record<string, ChasePoint>; winner: string | null; version: number };
-const chaseSessions = new Map<string, ChaseSession>();
 io.use(async (socket, next) => {
   try {
     const cookieHeader = socket.handshake.headers.cookie ?? '';
@@ -436,49 +538,10 @@ io.use(async (socket, next) => {
 });
 
 const ackError = (ack: ((value: unknown) => void) | undefined, code: string, message: string) => ack?.({ ok: false, error: { code, message } });
-const winLines = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
 io.on('connection', (socket) => {
   const user = socket.data.user as SessionUser;
   const coupleId = socket.data.coupleId as string;
   const room = `couple:${coupleId}`;
-
-  const currentChase = chaseSessions.get(coupleId);
-  if (currentChase) socket.emit('game:chase:state', currentChase);
-
-  socket.on('game:chase:start', async (_raw: unknown, ack?: (value: unknown) => void) => {
-    try {
-      const members = await pool.query('SELECT user_id FROM couple_members WHERE couple_id=$1 ORDER BY joined_at, user_id LIMIT 2', [coupleId]);
-      const partnerId = members.rows.find((member: { user_id: string }) => member.user_id !== user.id)?.user_id as string | undefined;
-      if (!partnerId) { ackError(ack, 'PARTNER_REQUIRED', 'Oyuna başlamak için partnerin çift alanına katılmalı.'); return; }
-      const onlinePlayers = await io.in(room).fetchSockets();
-      if (!onlinePlayers.some((online) => (online.data.user as SessionUser | undefined)?.id === partnerId)) {
-        ackError(ack, 'PARTNER_OFFLINE', 'Oyuna başlamak için partnerin de LoveSpace’te çevrimiçi olmalı.'); return;
-      }
-      const state: ChaseSession = {
-        id: randomUUID(), status: 'active', catcherId: user.id, runnerId: partnerId,
-        positions: { [user.id]: { x: 1, y: 2 }, [partnerId]: { x: 7, y: 3 } }, winner: null, version: 0,
-      };
-      chaseSessions.set(coupleId, state);
-      io.to(room).emit('game:chase:state', state);
-      ack?.({ ok: true, data: state });
-    } catch { ackError(ack, 'GAME_FAILED', 'Oyun başlatılamadı. Tekrar dene.'); }
-  });
-
-  socket.on('game:chase:move', (raw: unknown, ack?: (value: unknown) => void) => {
-    const parsed = z.object({ x: z.number().int().min(0).max(8), y: z.number().int().min(0).max(5) }).safeParse(raw);
-    if (!parsed.success) { ackError(ack, 'INVALID_MOVE', 'Hamle geçersiz.'); return; }
-    const state = chaseSessions.get(coupleId);
-    if (!state || state.status !== 'active' || !state.positions[user.id]) { ackError(ack, 'GAME_NOT_ACTIVE', 'Önce partnerinle yeni bir oyun başlat.'); return; }
-    const from = state.positions[user.id]; const next = parsed.data;
-    if (Math.abs(from.x - next.x) + Math.abs(from.y - next.y) !== 1) { ackError(ack, 'INVALID_MOVE', 'Bir seferde yalnızca bir kare ilerleyebilirsin.'); return; }
-    state.positions[user.id] = next;
-    if (state.positions[state.catcherId].x === state.positions[state.runnerId].x && state.positions[state.catcherId].y === state.positions[state.runnerId].y) {
-      state.status = 'completed'; state.winner = state.catcherId;
-    }
-    state.version += 1;
-    io.to(room).emit('game:chase:state', state);
-    ack?.({ ok: true, data: state });
-  });
 
   socket.on('chat:send', async (raw: unknown, ack?: (value: unknown) => void) => {
     const parsed = z.object({ clientId: z.string().uuid(), body: z.string().trim().min(1).max(4000) }).safeParse(raw);
